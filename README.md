@@ -1,14 +1,23 @@
-# llama3 implemented from scratch using numpy
+# 使用numpy从零开始构建 llam3 模型推理流程&Lora模型微调
+
+> 本次 llama3 模型复现中，我们小组使用 numpy 复现了完整的 llama3-8B 模型推理的流程，并在此基础上对其对模型改进了KVCache通过用空间换时间，减少计算成本，同时进行了类的封装，便于后续调用，训练以及修改。我们还针对其在CPU和GPU上运行的时间做了简单的对比，这里采用的是的流水线并行(Pipeline Parallelism)的策略来调用GPU。通过模拟将Transformer层逐层添加到GPU后再与输入执行相关运算，因此参数传递所消耗的时间也在考量范围内。之后，我们还针对 llama3-8B 的模型使用 LORA 进行了指令微调，这种低内存成本的微调方式使得我们能够在本地对 llama3-8B 模型进行微调。
+>
+
+
+
+## llama3 implemented from scratch using numpy
+
 在这个文件中，我从头开始实现了 llama3，一次一个张量和矩阵乘法。
 <br>
 此外，我将直接从 meta 所提供的 llama3 的模型文件中加载张量，所以运行此文件前需要下载权重。<br>
 官方权重下载链接： https://llama.meta.com/llama-downloads/<br>
 numpy实现参考：https://github.com/naklecha/llama3-from-scratch
+
 <div>
     <img src="images/archi.png"/>
 </div>
 
-## 分词器（tokenizer）
+### 分词器（tokenizer）
 im not going to implement a bpe tokenizer (but andrej karpathy has a really clean implementation)<br>
 这里不实现 bpe 分词器（具体可参考 https://llmbook-zh.github.io/LLMBook.pdf 4.3.1 BPE 分词）。
 
@@ -60,8 +69,6 @@ tokenizer = tiktoken.Encoding(
 
 
 
-
-
 ```python
 print(tokenizer.encode("hello world!"))
 tokenizer.decode(tokenizer.encode("hello world!"))
@@ -72,13 +79,7 @@ tokenizer.decode(tokenizer.encode("hello world!"))
 
 
 
-
-
-
-
-
-
-## 读取模型文件
+### 读取模型文件
 通常，阅读此内容就可以看到模型类别的编写方式以及其中的变量名称。
 <br>
 因为我们是从头开始实现 llama3，所以我们将一次读取一个张量内容。
@@ -118,8 +119,6 @@ print(json.dumps(list(model.keys())[:20], indent=4))
 
 
 
-
-
 ```python
 with open(Model_Home + "params.json", "r") as f:
     config = json.load(f)
@@ -139,7 +138,7 @@ config
 
 
 
-## 我们使用配置文件来推断有关模型的详细信息
+### 我们使用配置文件来推断有关模型的详细信息
 1. n_layers：该模型有 32 个transformer层
 2. n_heads：每个多头注意力块有 32 个头
 3. vocab_size：词汇量大小等等
@@ -157,7 +156,7 @@ norm_eps = config["norm_eps"]
 rope_theta = torch.tensor(config["rope_theta"])
 ```
 
-## 将文本转换为 **词元(tokens)**
+### 将文本转换为 **词元(tokens)**
 这里我们使用 tiktoken 的分词器
 <div>
     <img src="images/tokens.png" width="600"/>
@@ -180,7 +179,7 @@ print(len(prompt_split_as_tokens))
     17
 
 
-## 将 **词元** 转换为他们的 **嵌入(embedding)**
+### 将 **词元** 转换为他们的 **嵌入(embedding)**
 这是这个代码文件中中唯一使用内置神经网络模块的地方的部分
 <br>
 我们的 [17x1] 词元现在将变成 [17x4096]，即 17 个嵌入（每个词元）长度为 4096
@@ -226,7 +225,7 @@ print(token_embeddings_unnormalized.shape)
     (17, 4096)
 
 
-## 然后，我们使用 RMS 规范化对嵌入进行 **归一化(normalization)**
+### 然后，我们使用 RMS 规范化对嵌入进行 **归一化(normalization)**
 此步骤之后，维度不会改变，只是这些值进行了归一化
 <br>
 需要注意的是，我们需要一个norm_eps（来自配置文件）来避免出现将 RMS 设置为 0 的情况， 导致 0 为除数。
@@ -250,12 +249,13 @@ def rms_norm(tensor_np, norm_weights_np):
     return normalized_weights
 ```
 
-# 构建transformer的第一层
+### 构建transformer的第一层
 
-### 归一化
+#### 归一化
 可以看到 **注意力(Attention)** 块之前需要进行归一化。
 <br>
 在归一化后，它的形状仍然 [17x4096] 与嵌入相同。
+
 <div>
     <img src="images/norm.png" width="600"/>
 </div>
@@ -270,7 +270,7 @@ print(token_embeddings.shape)
 
 
 
-### 从头开始实现注意力
+#### 从头开始实现注意力
 让我们加载 transformer 第一层的注意头
 <div>
     <img src="images/qkv.png" width="600"/>
@@ -297,7 +297,7 @@ print(
     torch.Size([4096, 4096]) torch.Size([1024, 4096]) torch.Size([1024, 4096]) torch.Size([4096, 4096])
 
 
-### 分解查询
+#### 分解查询
 下面，我们将从多个注意力头中分解查询，最终得到的形状为 [32x128x4096]
 <br>
 其中 32 是 llama3 中的注意力头数，128 是查询向量的大小，4096 是 词元嵌入(token embedding) 的大小
@@ -313,7 +313,7 @@ print(q_layer0.shape)
     (32, 128, 4096)
 
 
-### 这里先实现第一层的第一个头
+#### 这里先实现第一层的第一个头
 这里我访问第一层的第一头的查询权重矩阵，这个查询权重矩阵的大小是[128x4096]
 
 
@@ -327,7 +327,7 @@ q_layer0_head0.shape
 
 
 
-### 现在，我们将查询权重与词元嵌入相乘，以获得对词元的查询
+#### 现在，我们将查询权重与词元嵌入相乘，以获得对词元的查询
 这里可以看到生成的形状是 [17x128]，这是因为我们有 17 个词元，每个词元都有一个 128 长度的查询。
 <div>
     <img src="images/q_per_token.png" width="600"/>
@@ -343,14 +343,15 @@ print(q_per_token.shape)
 
 
 
-## positioning encoding 定位编码
+### positioning encoding 位置编码
 我们在 **提示词(prompt)** 中为每个词元都有一个 查询向量，但如果仔细想想，个性化查询向量是不知道它在提示词中的位置的。
 <br><br>
 query: "the answer to the ultimate question of life, the universe, and everything is "
 <br><br>
 在提示词中，我们使用了 “the” 三次，我们需要这 3 个 “the” 标记的查询向量根据它们在查询中的位置生成不同的查询向量（每个大小为 [1x128]）。我们使用 RoPE（rotory positional embedding）执行这些旋转。
 <br><br>
-### RoPE
+
+#### RoPE
 watch this video to understand the math.
 https://www.youtube.com/watch?v=o29P0Kpobz0&t=530s<br>
 或者参考 https://llmbook-zh.github.io/LLMBook.pdf 5.2.4 位置编码 旋转位置编码（Rotary Position Embedding, RoPE）<br>
@@ -378,7 +379,7 @@ print(q_per_token_split_into_pairs.shape)
     <img src="images/qsplit.png" width="600"/>
 </div>
 
-## 使用复数的点积来旋转向量
+### 使用复数的点积来旋转向量
 <div>
     <img src="images/freq_cis.png" width="600"/>
 </div>
@@ -460,7 +461,7 @@ plt.show()
 ​    
 
 
-### 现在，每个词元的查询元素都有一个复数（角度变化向量）表示
+#### 现在，每个词元的查询元素都有一个复数（角度变化向量）表示
 我们可以将查询（我们拆分为成对的查询）转换为复数，然后根据位置利用点积来旋转 query。
 
 
@@ -487,10 +488,6 @@ q_per_token_as_complex_numbers.shape
     (17, 64)
 
 
-
-
-
-
 ```python
 # 旋转
 q_per_token_as_complex_numbers_rotated = q_per_token_as_complex_numbers * freqs_cis
@@ -502,7 +499,7 @@ q_per_token_as_complex_numbers_rotated.shape
 
 
 
-### 获得旋转向量后
+#### 获得旋转向量后
 我们需要将复数转为实数查询
 
 
@@ -548,7 +545,7 @@ q_per_token_rotated.shape
 
 
 
-# 键（与查询几乎相同）
+### 键（与查询几乎相同）
 <div>
     <img src="images/keys.png" width="600px"/>
 </div>
@@ -644,13 +641,13 @@ k_per_token_rotated.shape
 
 
 
-## 在此阶段，现在每个词元(toekn)都具有旋转后的查询和键。
+#### 在此阶段，现在每个词元(toekn)都具有旋转后的查询和键。
 <div>
     <img src="images/keys0.png" width="600px"/>
 </div>
 每个查询和键的形状都是 [17x128] 。
 
-## 在下一步中，我们需要将查询和键的矩阵相乘
+#### 在下一步中，我们需要将查询和键的矩阵相乘
 这样做我们会获得每个词元(toekn)之间相互映射的分数。
 <br>
 这个分数描述了每个词元(toekn)的查询与每个词元(toekn)的键的相关性。 **这就是自注意力**
@@ -671,7 +668,7 @@ qk_per_token.shape
 
 
 
-# 现在，我们需要屏蔽查询(Q)、键(K)的分数
+### 现在，我们需要屏蔽查询(Q)、键(K)的分数
 在 llama3 的训练过程中，未来的词元(toekn)的 QK 分数是被屏蔽的。
 <br>
 这是因为在训练过程中，我们只学习使用过去的词元(toekn)来预测词元(toekn)。
@@ -752,7 +749,7 @@ display_qk_heatmap(qk_per_token_after_masking_after_softmax)
 ​    
 
 
-## 值
+#### 值
 
 <div>
     <img src="images/value.png" width="600px"/>
@@ -791,7 +788,7 @@ v_layer0_head0.shape
 
 
 
-## 值向量
+#### 值向量
 <div>
     <img src="images/v0.png" width="600px"/>
 </div>
@@ -809,7 +806,7 @@ v_per_token.shape
 
 
 
-## 注意力(Attention)
+#### 注意力(Attention)
 <div>
     <img src="images/attention.png" width="600px"/>
 </div>
@@ -826,7 +823,7 @@ qkv_attention.shape
 
 
 
-# 多头注意力(multi head attention)
+### 多头注意力(multi head attention)
 <div>
     <img src="images/heads.png" width="600px"/>
 </div>
@@ -899,7 +896,7 @@ stacked_qkv_attention.shape
 
 
 
-# 权重矩阵（马上到最后了！）
+### 权重矩阵（马上到最后了！）
 <div>
     <img src="images/weightmatrix.png" width="600px"/>
 </div>
@@ -917,7 +914,7 @@ w_layer0.shape
 
 
 
-### 这是一个简单的线性层，所以我们只是进行矩阵乘法
+##### 这是一个简单的线性层，所以我们只是进行矩阵乘法
 
 
 ```python
@@ -946,7 +943,7 @@ embedding_after_edit.shape
 
 
 
-## 我们对嵌入增量(embedding delta)进行归一化，然后运行前馈神经网络
+#### 我们对嵌入增量(embedding delta)进行归一化，然后运行前馈神经网络
 <div>
     <img src="images/norm_after.png" width="600px"/>
 </div>
@@ -963,7 +960,7 @@ embedding_after_edit_normalized.shape
 
 
 
-## 加载 **前馈网络(Feed Forward  Network,FFN)** 权重并实现前馈网络
+#### 加载 **前馈网络(Feed Forward  Network,FFN)** 权重并实现前馈网络
 <div>
     <img src="images/swiglu.png" width="600px"/><br>
     <img src="images/Swish.png" width="600px"/><br>
@@ -999,7 +996,7 @@ output_after_feedforward.shape
 
 
 
-# 在第一层之后，我们终于为每个词元(TOKEN)提供了新的编辑嵌入(EDITED EMBEDDINGS)
+### 在第一层之后，我们终于为每个词元(TOKEN)提供了新的编辑嵌入(EDITED EMBEDDINGS)
 在我们完成之前，还有 31 个层（循环）
 <br>
 you can imagine this edited embedding as having information about all queries asked on the first layer<br>
@@ -1019,7 +1016,7 @@ layer_0_embedding.shape
 
 
 
-# 对每层进行循环(快结束了)
+### 对每层进行循环(快结束了)
 <div>
     <img src="images/god.png" width="600px"/>
 </div>
@@ -1089,7 +1086,7 @@ for layer in range(n_layers):
     final_embedding = embedding_after_edit+output_after_feedforward
 ```
 
-# 我们现在有了最终的嵌入，这是模型可以对下一个词元(token)做出的最佳猜测
+### 我们现在有了最终的嵌入，这是模型可以对下一个词元(token)做出的最佳猜测
 嵌入的形状与常规词元(token)嵌入 [17x4096] 相同，其中 17 是词元(token)数，4096 是嵌入维度
 <div>
     <img src="images/last_norm.png" width="600px"/>
@@ -1107,7 +1104,7 @@ final_embedding.shape
 
 
 
-# 最后，让我们解码嵌入到词元(token)值中
+### 最后，让我们解码嵌入到词元(token)值中
 <div>
     <img src="images/finallayer.png" width="600px"/>
 </div>
@@ -1123,7 +1120,7 @@ tensor_to_numpy(model["output.weight"]).shape
 
 
 
-# 我们使用最后一个词元(token)的嵌入来预测下一个值
+### 我们使用最后一个词元(token)的嵌入来预测下一个值
 
 在理想的情况下，我们期望得到的值是，42 <br>
 note：42 是"the answer to the ultimate question of life, the universe, and everything is "的答案，根据《银河系漫游指南》一书得出的，大多数 MORDERN LLM 在这里会回答 42，来验证我们的整个代码！
@@ -1140,7 +1137,7 @@ logits.shape
 
 
 
-### 模型预测下一个token为 2983 ，这是 42 的编码吗？
+##### 模型预测下一个token为 2983 ，这是 42 的编码吗？
 
 
 ```python
@@ -1153,7 +1150,7 @@ next_token
 
 
 
-# 解码
+### 解码
 <div>
     <img src="images/42.png" width="600px"/>
 </div>
@@ -1166,3 +1163,195 @@ tokenizer.decode([next_token.item()])
 
     '42'
 
+
+
+
+
+## llama3 模型封装
+
+详见llama3.py文件
+
+![image-20240716162805772](images/image-20240716162805772.png)
+
+### KV Cache
+
+<div>
+    <img src="images/KVCache.gif"/>
+</div>
+
+
+## GPU & CPU运行时间对比
+
+
+
+这里采用的是的流水线并行(Pipeline Parallelism)的策略来进行推理。  通过模拟将Transformer层逐层添加到GPU后再与输入执行相关运算，因此参数传递所消耗的时间也在考量范围内。
+
+具体可以查看gpu_vs_cpu.ipynb
+
+|          策略           |  时间   |
+| :---------------------: | :-----: |
+|           CPU           | 246.91s |
+|    CPU+AttentionGPU     | 207.19s |
+| CPU+AttentionGPU+FFNGPU | 251.98s |
+
+
+
+
+
+
+
+
+## Llama3-LORA-SFT
+
+> Llama3-8B 模型的 LORA 指令微调
+>
+> **指令微调(Instruction Tuning)** 是指使用自然语言形式的数据对预训练后的大语言模型进行参数微调,这一术语由谷歌研究员在 2022 年的一篇 ICLR 论文中正式提出。在一些参考文献中,指令微调也被称为 **有监督微调(Supervised  Fine-tuning)** 或 **多任务提示训练(Multitask Prompted Training)** 。指令微调过程需要首先收集或构建指令化的实例,然后通过有监督的方式对大语言模型的参数进行微调。经过指令微调后,大语言模型能够展现出较强的指令遵循能力,可以通过零样本学习的方式解决多种下游任务。
+
+
+
+原始模型：'<|begin_of_text|>山东大学（威海） 数'                                 -> '山东大学（威海） 数**学**'
+
+[128000, 58911, 68464, 102667, 10110, 105578, 56235, 7705, 48785] -> [58911, **68464**, 102667, 10110, 105578, **56235**, **7705**, 48785, 48864]
+
+希望达到的效果:
+
+Lora微调模型：'<|begin_of_text|>山东大学（威海） 数' 						-> '山东大学（威海） 数**科**'
+
+[128000, 58911, 68464, 102667, 10110, 105578, 56235, 7705, 48785] -> [58911, **68464**, 102667, 10110, 105578, **56235**, **7705**, 48785, 70626]
+
+
+
+[128000, 58911, 68464, 102667, 10110, 105578, 56235, 7705, 48785, 70626, 128001]
+
+['<|begin_of_text|>', '山', '东', '大学', '（', '威', '海', '）', ' 数', '科', '<|end_of_text|>']
+
+
+
+### Lora
+
+![img](images/QQ_1721058631624.png)
+
+就像论文LORA: LOW-RANK ADAPTATION OF LARGE LANGUAGE MODELS 标题所说，它通过对矩阵进行低秩分解从而达到减少模型参数量目的。
+
+公式如下：
+$$
+h = W_0x + \Delta Wx=W_0x + BAx
+$$
+
+
+在r的选择上我们根据论文不难看出，实验上r=4 或者 r=8 就能取得比较好的效果了，这里我取 r=8。
+
+![img](images/QQ_1721059239352.png)
+
+### 针对Transformer层QV进行Lora微调
+
+还是之前的图，现在我们所要考虑的就是需要进行指令微调部分的选择了，不难看出若是只对 $W_q$ 进行微调的话，模型表现上不如另外两种好，要是对 $W_q, W_k, W_v,W_o$ 都进行微调的话，效果与  $W_q, W_v$ 拉不开太大的差距。甚至在 r=8 时，MultiNLI上只训练$W_q, W_v$ 的效果更好，综上考虑我选择只对 $W_q, W_v$ 这两个权重进行微调。
+
+![img](README/QQ_1721059239352-17210599329961.png)
+
+具体的流程可以参看下这个草图
+
+![img](images/99c7ae884b72eada845e6518290a0c9a.jpeg)
+
+
+
+### 损失-交叉熵损失
+
+更新权重前，我们先要指定好模型结果的损失函数，模型处理的是一个多分类问题，对应标签的y是一个 one-hot向量。
+
+对输出进行softmax操作后，使得输出概率的和为1。之后再与one_hot编码相乘
+
+$$
+L = -(ylog \hat{y} + (1-y)log(1-\hat{y}))
+$$
+
+>  交叉熵是信息论中的一个重要概念，主要用于度量两个概率分布间的差异性。在机器学习中，交叉熵表示真实概率分布与预测概率分布之间的差异。其值越小，模型预测效果就越好。  交叉熵损失函数的公式为：
+
+
+
+  其中，y表示样本的真实标签，$\hat{y}$ 表示模型预测的标签。当y=1时，表示样本属于正类；当y=0时，表示样本属于负类。
+
+
+
+### 权重更新-反向传播
+
+
+
+#### 更新原则SDG
+
+
+$$
+\theta^{new} = \theta^{old} - \alpha \nabla_{\theta}J(\theta)
+$$
+
+
+$\alpha$ : 学习率
+
+
+
+#### 梯度
+
+
+$$
+F(\mathbfcal{x})=F(x_1,x_2,\dots,x_n)
+\\
+\frac{\partial F}{\partial \mathbfcal{x}}=[\frac{\partial F}{\partial x_1},\frac{\partial F}{\partial x_2},\cdots,\frac{\partial F}{\partial x_n}]
+$$
+
+$$
+F(\mathbfcal{x})=[F_1(x_1,x_2,\dots,x_n),F_1(x_1,x_2,\dots,x_n),\dots,F_1(x_1,x_2,\dots,x_n),]
+\\
+(\frac{\partial F}{\partial \mathbfcal{x}})_{i,j}=\frac{\partial F_i}{\partial x_j}
+$$
+
+
+
+
+#### 链式法则
+
+
+$$
+z=3y\\
+y=x^2\\
+\frac{dz}{dx}=\frac{dz}{dy}\frac{dy}{dx}=3 \times 2x=6x
+$$
+
+$$
+\mathbfcal{h}=f(\mathbf{z})\\
+\mathbf{z}=\mathbf{W}\mathbfcal{x}+\mathbf{b}\\
+\frac{\partial \mathbf{h}}{\partial \mathbfcal{x}}=\frac{\partial \mathbf{h}}{\partial \mathbf{z}}\frac{\partial \mathbf{z}}{\partial \mathbfcal{x}}=\cdots
+$$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 参考
+
+
+
+https://llmbook-zh.github.io/LLMBook.pdf
+
+https://github.com/naklecha/llama3-from-scratch
+
+https://arxiv.org/abs/2305.13245
+
+https://github.com/hscspring/llama.np/blob/main
+
+https://doi.org/10.48550/arXiv.2106.09685
+
+https://lightning.ai/lightning-ai/studios/code-lora-from-scratch?continueFlag=f5fc72b1f6eeeaf74b648b2aa8aaf8b6
+
+https://github.com/huggingface/peft
+
+https://medium.com/@joaolages/kv-caching-explained-276520203249
